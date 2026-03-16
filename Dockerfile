@@ -30,13 +30,16 @@ COPY package*.json ./
 COPY pnpm-lock.yaml ./
 
 # Install pnpm and then dependencies
-RUN npm install -g pnpm@9 && pnpm install --no-frozen-lockfile
+RUN npm install -g pnpm@9 && pnpm install --frozen-lockfile
 
 # Copy rest of the project files
 COPY . .
 
 # Expose app port (keep whatever your app actually listens on)
 EXPOSE 55771
+
+# Run as non-root user
+USER node
 
 # Start the dev / app server
 CMD ["npm", "run", "start"]

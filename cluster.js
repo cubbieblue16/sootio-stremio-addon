@@ -47,8 +47,8 @@ process.env.UV_THREADPOOL_SIZE = threadPoolSize;
 // Enable round-robin scheduling for better load distribution across workers
 cluster.schedulingPolicy = cluster.SCHED_RR;
 
-if (cluster.isMaster) {
-    console.log(`Master process ${process.pid} is running`);
+if (cluster.isPrimary) {
+    console.log(`Primary process ${process.pid} is running`);
     console.log(`System: ${numCPUs} CPUs, ${totalMemoryGB.toFixed(1)}GB RAM`);
     console.log(`Workers: ${workersToUse} (calculated: ${calculatedWorkers}, memory-limited: ${maxWorkersByMemory})`);
     console.log(`Thread pool: ${process.env.UV_THREADPOOL_SIZE} | Scheduling: Round-Robin`);
@@ -57,8 +57,9 @@ if (cluster.isMaster) {
     // Start memory monitoring in master process
     memoryMonitor.startMonitoring();
 
-    // Track worker restarts for crash loop detection
-    const workerRestarts = new Map(); // pid -> { count, lastRestart }
+    // Track worker restarts for crash loop detection by slot ID (not PID).
+    // New workers get new PIDs, so tracking by PID would never accumulate counts.
+    const workerRestarts = new Map(); // slotId -> { count, lastRestart }
     const RESTART_WINDOW_MS = 60000; // 1 minute window
     const MAX_RESTARTS_PER_WINDOW = 5;
     const RESTART_BACKOFF_MS = 2000; // Base backoff delay
@@ -70,7 +71,7 @@ if (cluster.isMaster) {
     const forkWorker = () => {
         const worker = cluster.fork();
         workersStarted++;
-        console.log(`Worker ${workersStarted}/${workersToUse} started (PID: ${worker.process.pid})`);
+        console.log(`Worker ${workersStarted}/${workersToUse} started (PID: ${worker.process.pid}, ID: ${worker.id})`);
         return worker;
     };
 
@@ -82,12 +83,13 @@ if (cluster.isMaster) {
     // Handle worker exits with crash loop protection
     cluster.on('exit', (worker, code, signal) => {
         const pid = worker.process.pid;
+        const slotId = worker.id;
         const now = Date.now();
 
-        console.log(`Worker ${pid} exited (code: ${code}, signal: ${signal})`);
+        console.log(`Worker ${pid} (slot ${slotId}) exited (code: ${code}, signal: ${signal})`);
 
-        // Track restarts for crash loop detection
-        let restartInfo = workerRestarts.get(pid) || { count: 0, lastRestart: 0 };
+        // Track restarts by worker slot ID so counts accumulate across replacement workers
+        let restartInfo = workerRestarts.get(slotId) || { count: 0, lastRestart: 0 };
 
         // Reset counter if outside window
         if (now - restartInfo.lastRestart > RESTART_WINDOW_MS) {
@@ -96,7 +98,7 @@ if (cluster.isMaster) {
 
         restartInfo.count++;
         restartInfo.lastRestart = now;
-        workerRestarts.set(pid, restartInfo);
+        workerRestarts.set(slotId, restartInfo);
 
         // Calculate backoff delay based on restart count
         const backoffDelay = Math.min(
@@ -105,19 +107,19 @@ if (cluster.isMaster) {
         );
 
         if (restartInfo.count > MAX_RESTARTS_PER_WINDOW) {
-            console.error(`Worker crash loop detected (${restartInfo.count} restarts in ${RESTART_WINDOW_MS}ms). Delaying restart by ${backoffDelay}ms`);
+            console.error(`Worker slot ${slotId} crash loop detected (${restartInfo.count} restarts in ${RESTART_WINDOW_MS}ms). Delaying restart by ${backoffDelay}ms`);
         }
 
         // Restart worker with backoff
         setTimeout(() => {
-            console.log('Starting replacement worker...');
+            console.log(`Starting replacement worker for slot ${slotId}...`);
             cluster.fork();
         }, restartInfo.count > 1 ? backoffDelay : 100);
 
         // Cleanup old restart tracking entries
-        for (const [oldPid, info] of workerRestarts.entries()) {
+        for (const [oldSlotId, info] of workerRestarts.entries()) {
             if (now - info.lastRestart > RESTART_WINDOW_MS * 2) {
-                workerRestarts.delete(oldPid);
+                workerRestarts.delete(oldSlotId);
             }
         }
     });
