@@ -11,7 +11,7 @@ import requestIp from 'request-ip';
  */
 export function getRateLimiter() {
     return rateLimit({
-        windowMs: 120 * 120 * 1000,
+        windowMs: 2 * 60 * 60 * 1000, // 2 hours
         limit: 2000, // Increased from 1000 to 2000 requests per window
         standardHeaders: true,
         legacyHeaders: false,

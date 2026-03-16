@@ -96,58 +96,6 @@ async function resolveHttpStreamUrlInSubprocess(url) {
     return null;
 }
 
-// Bot detection and anti-scraping utilities
-const BOT_USER_AGENTS = [
-    /bot/i,
-    /crawler/i,
-    /spider/i,
-    /slurp/i,
-    /teoma/i,
-    /heritrix/i,
-    /setoozbot/i,
-    /discobot/i,
-    /purebot/i,
-    /yacybot/i,
-    /acoonbot/i,
-    /findlink/i,
-    /linkedinbot/i,
-    /embedly/i,
-    /quora link preview/i,
-    /ahrefsbot/i,
-    /siteexplorer/i,
-    /majestic12/i,
-    /oozbot/i,
-    /netcraft/i,
-    /trendiction/i,
-    /dbot/i,
-    /seznambot/i,
-    /ec2linkfinder/i,
-    /gslfbot/i,
-    /aihitbot/i,
-    /intelium_bot/i,
-    /facebookexternalhit/i,
-    /yeti/i,
-    /retrevo/i,
-    /silk/i,
-    /ltbot/i,
-    /pinterest/i,
-    /telegrambot/i,
-    /tumblr/i,
-    /redditbot/i,
-    /slackbot/i,
-    /whatsapp/i,
-    /discordbot/i,
-    /go-http-client/i,
-    /python-requests/i,
-    /axios/i,
-    /node-fetch/i,
-    /php-curl/i,
-    /java/i,
-    /okhttp/i,
-    /curl/i,
-    /wget/i
-];
-
 // Track suspicious IPs with detailed pattern analysis (in-memory for now, could be extended to Redis/DB)
 const suspiciousIPs = new Map(); // ip -> { count, firstSeen, isBlocked, requestHistory, lastRequestTime }
 const BLOCK_THRESHOLD = 20; // Increased threshold to reduce false positives (was 15)
@@ -1214,6 +1162,30 @@ app.get('/verify-proxy', async (req, res) => {
 
     if (!url) {
         return res.json({ success: false, error: 'Proxy URL is required' });
+    }
+
+    // SSRF protection: validate URL is not targeting internal networks
+    const validateExternalUrl = (urlString) => {
+      try {
+        const parsed = new URL(urlString);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+        const hostname = parsed.hostname.toLowerCase();
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0') return false;
+        // Block private IP ranges
+        const parts = hostname.split('.').map(Number);
+        if (parts.length === 4 && parts.every(p => !isNaN(p))) {
+          if (parts[0] === 10) return false;
+          if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+          if (parts[0] === 192 && parts[1] === 168) return false;
+          if (parts[0] === 169 && parts[1] === 254) return false;
+          if (parts[0] === 0) return false;
+        }
+        return true;
+      } catch { return false; }
+    };
+
+    if (!validateExternalUrl(url)) {
+      return res.status(400).json({ error: 'Invalid URL: must be a public HTTP(S) URL' });
     }
 
     try {
@@ -2385,70 +2357,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         const directUrl = `${proxyUrl}${apiKey ? (proxyUrl.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(apiKey) : ''}`;
         console.log(`[USENET-UNIVERSAL] Redirecting client directly to file server: ${directUrl}`);
         return res.redirect(302, directUrl);
-
-        // Make request to file server (full stream)
-        try {
-            axiosResponse = await axios.get(proxyUrl, {
-                headers,
-                responseType: 'stream',
-                validateStatus: (status) => status < 500,
-                timeout: 60000,
-                decompress: false
-            });
-        } catch (err) {
-            console.log(`[USENET-UNIVERSAL] Stream request failed: ${err.message}`);
-            cleanupConnection();
-            return res.status(202).send('Video file not yet ready for streaming. Please retry in a moment.');
-        }
-
-        // Forward response status and headers
-        res.status(axiosResponse.status);
-        Object.keys(axiosResponse.headers).forEach(key => {
-            res.setHeader(key, axiosResponse.headers[key]);
-        });
-
-        // Update file size and completion
-        if (axiosResponse.headers['content-range']) {
-            const rangeMatch = axiosResponse.headers['content-range'].match(/bytes \d+-\d+\/(\d+)/);
-            if (rangeMatch) {
-                streamInfo.fileSize = parseInt(rangeMatch[1]);
-            }
-        } else if (axiosResponse.headers['content-length']) {
-            streamInfo.fileSize = parseInt(axiosResponse.headers['content-length']);
-        }
-
-        if (streamInfo.fileSize > 0) {
-            streamInfo.completionPercentage = Math.round((streamInfo.maxBytePosition / streamInfo.fileSize) * 100);
-        }
-
-        // MEMORY LEAK FIX: Properly handle stream errors and cleanup
-        axiosResponse.data.on('error', (err) => {
-            console.log(`[USENET-UNIVERSAL] Stream error: ${err.message}`);
-            cleanupConnection();
-        });
-
-        res.on('error', (err) => {
-            console.log(`[USENET-UNIVERSAL] Response error: ${err.message}`);
-            cleanupConnection();
-        });
-
-        res.on('close', cleanupConnection);
-
-        // Pipe the response
-        axiosResponse.data.pipe(res);
-
     } catch (error) {
         console.error('[USENET-UNIVERSAL] Error:', error.message);
-
-        // MEMORY LEAK FIX: Clean up axios response on error
-        if (axiosResponse && axiosResponse.data && typeof axiosResponse.data.destroy === 'function') {
-            try {
-                axiosResponse.data.destroy();
-            } catch (e) {
-                // Ignore cleanup errors
-            }
-        }
-        axiosResponse = null; // Clear reference
 
         if (!res.headersSent) {
             return res.status(500).send('Error streaming file');
@@ -3379,7 +3289,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             streamInfo.streamCount++;
 
             // Update file size estimate if file is still extracting and we have better info
-            if (isBeingExtracted && status.percentComplete && status.percentComplete > 0) {
+            if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
                 // Estimate based on current progress
                 const estimateFromProgress = stat.size / (status.percentComplete / 100);
 
@@ -3395,7 +3305,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 console.log(`[USENET] File extraction: ${(stat.size / 1024 / 1024).toFixed(1)} MB extracted (${extractedPercent.toFixed(1)}%), download at ${status.percentComplete.toFixed(1)}%, estimated final: ${(newEstimate / 1024 / 1024).toFixed(1)} MB`);
 
                 streamInfo.fileSize = newEstimate;
-            } else if (!isBeingExtracted && stat.size > streamInfo.fileSize) {
+            } else if (!isIncomplete && stat.size > streamInfo.fileSize) {
                 // File finished extracting, use actual size
                 streamInfo.fileSize = stat.size;
             }
@@ -3435,7 +3345,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                         );
                     }
 
-                    if (isBeingExtracted && bytePosition >= maxSafePosition) {
+                    if (isIncomplete && bytePosition >= maxSafePosition) {
                         const extractedPercent = streamInfo.fileSize > 0 ? (stat.size / streamInfo.fileSize * 100) : 0;
                         const targetSize = bytePosition + (10 * 1024 * 1024); // Need 10MB past seek point
                         const waitMessage = bytePosition >= stat.size
@@ -3492,7 +3402,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
         const range = req.headers.range;
         let fileSize = estimatedFileSize;
 
-        console.log(`[USENET] File info - Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB, Being extracted: ${isBeingExtracted}`);
+        console.log(`[USENET] File info - Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB, Being extracted: ${isIncomplete}`);
 
         if (range) {
             const parts = range.replace(/bytes=/, '').split('-');
@@ -3507,7 +3417,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             // Check if requested range is beyond what's available
             if (start >= stat.size) {
                 // Range not yet available - wait for it if file is still being extracted
-                if (isBeingExtracted || status.status === 'downloading') {
+                if (isIncomplete || status.status === 'downloading') {
                     console.log(`[USENET] Range ${start}-${end} not yet available, file size: ${stat.size} bytes`);
 
                     // Wait up to 60 seconds for the file to grow
