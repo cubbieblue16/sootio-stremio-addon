@@ -89,7 +89,7 @@ builder.defineCatalogHandler((args) => {
         } else if (args.id == 'debridsearch') {
             // Request to Debrid Search
             // Search catalog request
-            if (args.extra.search) {
+            if (args.extra?.search) {
                 CatalogProvider.searchTorrents(args.config, args.extra.search)
                     .then(metas => {
                         console.log("Response metas: " + JSON.stringify(metas))
@@ -104,7 +104,7 @@ builder.defineCatalogHandler((args) => {
                     })
             } else {
                 // Standard catalog request
-                CatalogProvider.listTorrents(args.config, args.extra.skip, args.type)
+                CatalogProvider.listTorrents(args.config, args.extra?.skip, args.type)
                     .then(metas => {
                         console.log("Response metas: " + JSON.stringify(metas))
                         resolve({
