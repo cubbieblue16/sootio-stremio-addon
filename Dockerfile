@@ -35,6 +35,9 @@ RUN npm install -g pnpm@9 && pnpm install --frozen-lockfile
 # Copy rest of the project files
 COPY . .
 
+# Create data directory and set ownership for non-root user
+RUN mkdir -p /app/data /app/performance_cache && chown -R node:node /app
+
 # Expose app port (keep whatever your app actually listens on)
 EXPOSE 55771
 
