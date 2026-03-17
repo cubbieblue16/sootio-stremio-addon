@@ -57,9 +57,11 @@ if (cluster.isPrimary) {
     // Start memory monitoring in master process
     memoryMonitor.startMonitoring();
 
-    // Track worker restarts for crash loop detection by slot ID (not PID).
-    // New workers get new PIDs, so tracking by PID would never accumulate counts.
-    const workerRestarts = new Map(); // slotId -> { count, lastRestart }
+    // Track worker restarts for crash loop detection by fixed slot number.
+    // worker.id auto-increments and is never reused, so we map each worker
+    // back to its original slot (0..N-1) to accumulate restart counts.
+    const workerRestarts = new Map(); // slot -> { count, lastRestart }
+    const workerSlotMap = new Map(); // worker.id -> slot number
     const RESTART_WINDOW_MS = 60000; // 1 minute window
     const MAX_RESTARTS_PER_WINDOW = 5;
     const RESTART_BACKOFF_MS = 2000; // Base backoff delay
@@ -68,28 +70,30 @@ if (cluster.isPrimary) {
     const STAGGER_DELAY_MS = 50;
     let workersStarted = 0;
 
-    const forkWorker = () => {
+    const forkWorker = (slot) => {
         const worker = cluster.fork();
+        workerSlotMap.set(worker.id, slot);
         workersStarted++;
-        console.log(`Worker ${workersStarted}/${workersToUse} started (PID: ${worker.process.pid}, ID: ${worker.id})`);
+        console.log(`Worker slot ${slot} started (PID: ${worker.process.pid}, ID: ${worker.id})`);
         return worker;
     };
 
     // Staggered worker startup
     for (let i = 0; i < workersToUse; i++) {
-        setTimeout(() => forkWorker(), i * STAGGER_DELAY_MS);
+        setTimeout(() => forkWorker(i), i * STAGGER_DELAY_MS);
     }
 
     // Handle worker exits with crash loop protection
     cluster.on('exit', (worker, code, signal) => {
         const pid = worker.process.pid;
-        const slotId = worker.id;
+        const slot = workerSlotMap.get(worker.id) ?? -1;
+        workerSlotMap.delete(worker.id);
         const now = Date.now();
 
-        console.log(`Worker ${pid} (slot ${slotId}) exited (code: ${code}, signal: ${signal})`);
+        console.log(`Worker PID ${pid} (slot ${slot}) exited (code: ${code}, signal: ${signal})`);
 
-        // Track restarts by worker slot ID so counts accumulate across replacement workers
-        let restartInfo = workerRestarts.get(slotId) || { count: 0, lastRestart: 0 };
+        // Track restarts by fixed slot number so counts accumulate across replacement workers
+        let restartInfo = workerRestarts.get(slot) || { count: 0, lastRestart: 0 };
 
         // Reset counter if outside window
         if (now - restartInfo.lastRestart > RESTART_WINDOW_MS) {
@@ -98,7 +102,7 @@ if (cluster.isPrimary) {
 
         restartInfo.count++;
         restartInfo.lastRestart = now;
-        workerRestarts.set(slotId, restartInfo);
+        workerRestarts.set(slot, restartInfo);
 
         // Calculate backoff delay based on restart count
         const backoffDelay = Math.min(
@@ -107,19 +111,19 @@ if (cluster.isPrimary) {
         );
 
         if (restartInfo.count > MAX_RESTARTS_PER_WINDOW) {
-            console.error(`Worker slot ${slotId} crash loop detected (${restartInfo.count} restarts in ${RESTART_WINDOW_MS}ms). Delaying restart by ${backoffDelay}ms`);
+            console.error(`Worker slot ${slot} crash loop detected (${restartInfo.count} restarts in ${RESTART_WINDOW_MS}ms). Delaying restart by ${backoffDelay}ms`);
         }
 
-        // Restart worker with backoff
+        // Restart worker with backoff, mapping new worker to same slot
         setTimeout(() => {
-            console.log(`Starting replacement worker for slot ${slotId}...`);
-            cluster.fork();
+            console.log(`Starting replacement worker for slot ${slot}...`);
+            forkWorker(slot);
         }, restartInfo.count > 1 ? backoffDelay : 100);
 
         // Cleanup old restart tracking entries
-        for (const [oldSlotId, info] of workerRestarts.entries()) {
+        for (const [oldSlot, info] of workerRestarts.entries()) {
             if (now - info.lastRestart > RESTART_WINDOW_MS * 2) {
-                workerRestarts.delete(oldSlotId);
+                workerRestarts.delete(oldSlot);
             }
         }
     });

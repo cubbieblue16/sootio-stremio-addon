@@ -19,9 +19,9 @@ export function checkAdminAuth(req, res, next) {
         return res.status(501).send('Admin authentication not configured. Set ADMIN_PASSWORD environment variable.');
     }
 
-    const passwordBuffer = Buffer.from(password || '');
-    const expectedBuffer = Buffer.from(expectedPassword);
-    if (passwordBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(passwordBuffer, expectedBuffer)) {
+    const passHash = crypto.createHash('sha256').update(password || '').digest();
+    const expectedHash = crypto.createHash('sha256').update(expectedPassword).digest();
+    if (!crypto.timingSafeEqual(passHash, expectedHash)) {
         return res.status(401).send('Unauthorized. Provide correct password via X-Admin-Password header.');
     }
 
